@@ -1,0 +1,106 @@
+name: 🌉 Shadcn Censorship Bridge (Universal)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scaffold_next:
+        description: "Scaffold a new Next.js project if none exists?"
+        required: false
+        default: "no"
+        type: choice
+        options: ["no", "yes"]
+      app_type:
+        description: "Next.js router type (only if scaffold_next = yes)"
+        required: false
+        default: "app"
+        type: choice
+        options: ["app", "pages"]
+      init_options:
+        description: 'Options for "shadcn init" (leave empty for default, or e.g. @intentui/theme-default)'
+        required: false
+        default: ""
+        type: string
+      components:
+        description: "Component(s) to add (space‑separated, e.g. button dialog)"
+        required: true
+        type: string
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect package manager
+        id: detect
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            echo "pm=pnpm" >> $GITHUB_OUTPUT
+          elif [ -f yarn.lock ]; then
+            echo "pm=yarn" >> $GITHUB_OUTPUT
+          else
+            echo "pm=npm" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup pnpm (if needed)
+        if: steps.detect.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@v4
+        with:
+          version: "9"
+
+      - name: Remove orphaned pnpm-workspace.yaml
+        run: rm -f pnpm-workspace.yaml
+
+      - name: Scaffold Next.js if project is empty and requested
+        if: hashFiles('package.json') == '' && github.event.inputs.scaffold_next == 'yes'
+        run: |
+          if [ "${{ github.event.inputs.app_type }}" = "app" ]; then
+            npx create-next-app@latest temp-proj --app --typescript --tailwind --eslint --src-dir --import-alias "@/*" --use-${{ steps.detect.outputs.pm }}
+          else
+            npx create-next-app@latest temp-proj --no-app --typescript --tailwind --eslint --src-dir --import-alias "@/*" --use-${{ steps.detect.outputs.pm }}
+          fi
+          shopt -s dotglob
+          mv temp-proj/* .
+          mv temp-proj/.* . 2>/dev/null || true
+          rmdir temp-proj
+          ${{ steps.detect.outputs.pm }} install
+
+      - name: Install dependencies (existing project)
+        if: hashFiles('package.json') != ''
+        run: ${{ steps.detect.outputs.pm }} install
+
+      - name: Run shadcn init (force defaults in CI)
+        run: |
+          if [ ! -f components.json ]; then
+            echo "Running shadcn init with defaults..."
+            npx shadcn@latest init ${{ github.event.inputs.init_options }} --force --silent --yes --defaults
+          else
+            echo "shadcn already initialized."
+          fi
+
+      - name: Verify components.json exists
+        run: |
+          if [ ! -f components.json ]; then
+            echo "components.json was not created. Creating a minimal one..."
+            printf '{\n  "$schema": "https://ui.shadcn.com/schema.json",\n  "style": "default",\n  "rsc": true,\n  "tsx": true,\n  "tailwind": {\n    "config": "tailwind.config.ts",\n    "css": "src/app/globals.css",\n    "baseColor": "slate",\n    "cssVariables": true,\n    "prefix": ""\n  },\n  "aliases": {\n    "components": "@/components",\n    "ui": "@/components/ui",\n    "utils": "@/lib/utils",\n    "lib": "@/lib",\n    "hooks": "@/hooks"\n  }\n}\n' > components.json
+          fi
+
+      - name: Add requested components
+        run: npx shadcn@latest add ${{ github.event.inputs.components }} --yes
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Add ${{ github.event.inputs.components }} via Shadcn Bridge" || echo "Nothing to commit"
+          git push
